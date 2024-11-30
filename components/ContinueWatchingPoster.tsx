@@ -1,43 +1,78 @@
 import { apiAtom } from "@/providers/JellyfinProvider";
 import { BaseItemDto } from "@jellyfin/sdk/lib/generated-client/models";
 import { Image } from "expo-image";
-import { useAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { useMemo, useState } from "react";
 import { View } from "react-native";
 import { WatchedIndicator } from "./WatchedIndicator";
-import { getPrimaryImageUrl } from "@/utils/jellyfin/image/getPrimaryImageUrl";
+import React from "react";
 
 type ContinueWatchingPosterProps = {
   item: BaseItemDto;
+  useEpisodePoster?: boolean;
+  size?: "small" | "normal";
 };
 
 const ContinueWatchingPoster: React.FC<ContinueWatchingPosterProps> = ({
   item,
+  useEpisodePoster = false,
+  size = "normal",
 }) => {
-  const [api] = useAtom(apiAtom);
+  const api = useAtomValue(apiAtom);
 
-  const url = useMemo(
-    () =>
-      getPrimaryImageUrl({
-        api,
-        item,
-        quality: 70,
-        width: 300,
-      }),
-    [item],
-  );
+  /**
+   * Get horrizontal poster for movie and episode, with failover to primary.
+   */
+  const url = useMemo(() => {
+    if (!api) return;
+    if (item.Type === "Episode" && useEpisodePoster) {
+      return `${api?.basePath}/Items/${item.Id}/Images/Primary?fillHeight=389&quality=80`;
+    }
+    if (item.Type === "Episode") {
+      if (item.ParentBackdropItemId && item.ParentThumbImageTag)
+        return `${api?.basePath}/Items/${item.ParentBackdropItemId}/Images/Thumb?fillHeight=389&quality=80&tag=${item.ParentThumbImageTag}`;
+      else
+        return `${api?.basePath}/Items/${item.Id}/Images/Primary?fillHeight=389&quality=80`;
+    }
+    if (item.Type === "Movie") {
+      if (item.ImageTags?.["Thumb"])
+        return `${api?.basePath}/Items/${item.Id}/Images/Thumb?fillHeight=389&quality=80&tag=${item.ImageTags?.["Thumb"]}`;
+      else
+        return `${api?.basePath}/Items/${item.Id}/Images/Primary?fillHeight=389&quality=80`;
+    }
+    if (item.Type === "Program") {
+      if (item.ImageTags?.["Thumb"])
+        return `${api?.basePath}/Items/${item.Id}/Images/Thumb?fillHeight=389&quality=80&tag=${item.ImageTags?.["Thumb"]}`;
+      else
+        return `${api?.basePath}/Items/${item.Id}/Images/Primary?fillHeight=389&quality=80`;
+    }
+  }, [item]);
 
-  const [progress, setProgress] = useState(
-    item.UserData?.PlayedPercentage || 0,
-  );
+  const progress = useMemo(() => {
+    if (item.Type === "Program") {
+      const startDate = new Date(item.StartDate || "");
+      const endDate = new Date(item.EndDate || "");
+      const now = new Date();
+      const total = endDate.getTime() - startDate.getTime();
+      const elapsed = now.getTime() - startDate.getTime();
+      return (elapsed / total) * 100;
+    } else {
+      return item.UserData?.PlayedPercentage || 0;
+    }
+  }, [item]);
 
   if (!url)
     return (
-      <View className="w-48 aspect-video border border-neutral-800"></View>
+      <View className="aspect-video border border-neutral-800 w-44"></View>
     );
 
   return (
-    <View className="w-48 relative aspect-video rounded-lg overflow-hidden border border-neutral-800">
+    <View
+      className={`
+      relative w-44 aspect-video rounded-lg overflow-hidden border border-neutral-800
+      ${size === "small" ? "w-32" : "w-44"}
+    `}
+    >
       <Image
         key={item.Id}
         id={item.Id}
@@ -52,10 +87,7 @@ const ContinueWatchingPoster: React.FC<ContinueWatchingPosterProps> = ({
       {progress > 0 && (
         <>
           <View
-            style={{
-              width: `100%`,
-            }}
-            className={`absolute bottom-0 left-0 h-1 bg-neutral-700 opacity-80 w-full`}
+            className={`absolute w-100 bottom-0 left-0 h-1 bg-neutral-700 opacity-80 w-full`}
           ></View>
           <View
             style={{

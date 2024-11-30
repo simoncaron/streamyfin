@@ -1,11 +1,19 @@
-import { useCallback } from "react";
-import { useAtom } from "jotai";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as FileSystem from "expo-file-system";
-import { FFmpegKit, FFmpegKitConfig } from "ffmpeg-kit-react-native";
-import { BaseItemDto } from "@jellyfin/sdk/lib/generated-client/models";
-import { runningProcesses } from "@/utils/atoms/downloads";
+import { useDownload } from "@/providers/DownloadProvider";
+import { apiAtom } from "@/providers/JellyfinProvider";
+import { getItemImage } from "@/utils/getItemImage";
 import { writeToLog } from "@/utils/log";
+import {
+  BaseItemDto,
+  MediaSourceInfo,
+} from "@jellyfin/sdk/lib/generated-client/models";
+import { useQueryClient } from "@tanstack/react-query";
+import * as FileSystem from "expo-file-system";
+import { useRouter } from "expo-router";
+import { FFmpegKit, FFmpegKitConfig } from "ffmpeg-kit-react-native";
+import { useAtomValue } from "jotai";
+import { useCallback } from "react";
+import { toast } from "sonner-native";
+import useImageStorage from "./useImageStorage";
 
 /**
  * Custom hook for remuxing HLS to MP4 using FFmpeg.
@@ -14,125 +22,175 @@ import { writeToLog } from "@/utils/log";
  * @param item - The BaseItemDto object representing the media item
  * @returns An object with remuxing-related functions
  */
-export const useRemuxHlsToMp4 = (url: string, item: BaseItemDto) => {
-  const [_, setProgress] = useAtom(runningProcesses);
+export const useRemuxHlsToMp4 = () => {
+  const api = useAtomValue(apiAtom);
+  const queryClient = useQueryClient();
+  const { saveDownloadedItemInfo, setProcesses } = useDownload();
+  const router = useRouter();
+  const { saveImage } = useImageStorage();
 
-  if (!item.Id || !item.Name) {
-    writeToLog("ERROR", "useRemuxHlsToMp4 ~ missing arguments");
-    throw new Error("Item must have an Id and Name");
-  }
+  const startRemuxing = useCallback(
+    async (item: BaseItemDto, url: string, mediaSource: MediaSourceInfo) => {
+      const output = `${FileSystem.documentDirectory}${item.Id}.mp4`;
+      if (!api) throw new Error("API is not defined");
+      if (!item.Id) throw new Error("Item must have an Id");
 
-  const output = `${FileSystem.documentDirectory}${item.Id}.mp4`;
-  const command = `-y -loglevel quiet -thread_queue_size 512 -protocol_whitelist file,http,https,tcp,tls,crypto -multiple_requests 1 -tcp_nodelay 1 -fflags +genpts -i ${url} -c copy -bufsize 50M -max_muxing_queue_size 4096 ${output}`;
-
-  const startRemuxing = useCallback(async () => {
-    writeToLog(
-      "INFO",
-      `useRemuxHlsToMp4 ~ startRemuxing for item ${item.Name}`,
-    );
-
-    try {
-      setProgress({ item, progress: 0, startTime: new Date(), speed: 0 });
-
-      FFmpegKitConfig.enableStatisticsCallback((statistics) => {
-        const videoLength =
-          (item.MediaSources?.[0]?.RunTimeTicks || 0) / 10000000; // In seconds
-        const fps = item.MediaStreams?.[0]?.RealFrameRate || 25;
-        const totalFrames = videoLength * fps;
-        const processedFrames = statistics.getVideoFrameNumber();
-        const speed = statistics.getSpeed();
-
-        const percentage =
-          totalFrames > 0
-            ? Math.floor((processedFrames / totalFrames) * 100)
-            : 0;
-
-        setProgress((prev) =>
-          prev?.item.Id === item.Id!
-            ? { ...prev, progress: percentage, speed }
-            : prev,
-        );
+      const itemImage = getItemImage({
+        item,
+        api,
+        variant: "Primary",
+        quality: 90,
+        width: 500,
       });
 
-      // Await the execution of the FFmpeg command and ensure that the callback is awaited properly.
-      await new Promise<void>((resolve, reject) => {
-        FFmpegKit.executeAsync(command, async (session) => {
-          try {
-            const returnCode = await session.getReturnCode();
+      await saveImage(item.Id, itemImage?.uri);
 
-            if (returnCode.isValueSuccess()) {
-              await updateDownloadedFiles(item);
-              writeToLog(
-                "INFO",
-                `useRemuxHlsToMp4 ~ remuxing completed successfully for item: ${item.Name}`,
-              );
-              resolve();
-            } else if (returnCode.isValueError()) {
+      toast.success(`Download started for ${item.Name}`, {
+        action: {
+          label: "Go to download",
+          onClick: () => {
+            router.push("/downloads");
+            toast.dismiss();
+          },
+        },
+      });
+
+      const command = `-y -thread_queue_size 512 -protocol_whitelist file,http,https,tcp,tls,crypto -multiple_requests 1 -tcp_nodelay 1 -fflags +genpts -i ${url} -map 0:v -map 0:a -c copy -bufsize 50M -max_muxing_queue_size 4096 ${output}`;
+
+      writeToLog(
+        "INFO",
+        `useRemuxHlsToMp4 ~ startRemuxing for item ${item.Name}`
+      );
+
+      try {
+        setProcesses((prev) => [
+          ...prev,
+          {
+            id: "",
+            deviceId: "",
+            inputUrl: "",
+            item: item,
+            itemId: item.Id!,
+            outputPath: "",
+            progress: 0,
+            status: "downloading",
+            timestamp: new Date(),
+          },
+        ]);
+
+        FFmpegKitConfig.enableStatisticsCallback((statistics) => {
+          const videoLength =
+            (item.MediaSources?.[0]?.RunTimeTicks || 0) / 10000000; // In seconds
+          const fps = item.MediaStreams?.[0]?.RealFrameRate || 25;
+          const totalFrames = videoLength * fps;
+          const processedFrames = statistics.getVideoFrameNumber();
+          const speed = statistics.getSpeed();
+
+          const percentage =
+            totalFrames > 0
+              ? Math.floor((processedFrames / totalFrames) * 100)
+              : 0;
+
+          if (!item.Id) throw new Error("Item is undefined");
+          setProcesses((prev) => {
+            return prev.map((process) => {
+              if (process.itemId === item.Id) {
+                return {
+                  ...process,
+                  progress: percentage,
+                  speed: Math.max(speed, 0),
+                };
+              }
+              return process;
+            });
+          });
+        });
+
+        // Await the execution of the FFmpeg command and ensure that the callback is awaited properly.
+        await new Promise<void>((resolve, reject) => {
+          FFmpegKit.executeAsync(command, async (session) => {
+            try {
+              const returnCode = await session.getReturnCode();
+              const startTime = new Date();
+
+              let endTime;
+              if (returnCode.isValueSuccess()) {
+                endTime = new Date();
+                writeToLog(
+                  "INFO",
+                  `useRemuxHlsToMp4 ~ remuxing completed successfully for item: ${
+                    item.Name
+                  }, start time: ${startTime.toISOString()}, end time: ${endTime.toISOString()}, duration: ${
+                    (endTime.getTime() - startTime.getTime()) / 1000
+                  }s`
+                );
+                if (!item) throw new Error("Item is undefined");
+                await saveDownloadedItemInfo(item);
+                toast.success("Download completed");
+                await queryClient.invalidateQueries({
+                  queryKey: ["downloadedItems"],
+                });
+                resolve();
+              } else if (returnCode.isValueError()) {
+                endTime = new Date();
+                const allLogs = session.getAllLogsAsString();
+                writeToLog(
+                  "ERROR",
+                  `useRemuxHlsToMp4 ~ remuxing failed for item: ${
+                    item.Name
+                  }, start time: ${startTime.toISOString()}, end time: ${endTime.toISOString()}, duration: ${
+                    (endTime.getTime() - startTime.getTime()) / 1000
+                  }s. All logs: ${allLogs}`
+                );
+                reject(new Error("Remuxing failed"));
+              } else if (returnCode.isValueCancel()) {
+                endTime = new Date();
+                writeToLog(
+                  "INFO",
+                  `useRemuxHlsToMp4 ~ remuxing was canceled for item: ${
+                    item.Name
+                  }, start time: ${startTime.toISOString()}, end time: ${endTime.toISOString()}, duration: ${
+                    (endTime.getTime() - startTime.getTime()) / 1000
+                  }s`
+                );
+                resolve();
+              }
+
+              setProcesses((prev) => {
+                return prev.filter((process) => process.itemId !== item.Id);
+              });
+            } catch (e) {
+              const error = e as Error;
+              const errorLog = `Error: ${error.message}, Stack: ${error.stack}`;
               writeToLog(
                 "ERROR",
-                `useRemuxHlsToMp4 ~ remuxing failed for item: ${item.Name}`,
+                `useRemuxHlsToMp4 ~ Exception during remuxing for item: ${item.Name}, ${errorLog}`
               );
-              reject(new Error("Remuxing failed")); // Reject the promise on error
-            } else if (returnCode.isValueCancel()) {
-              writeToLog(
-                "INFO",
-                `useRemuxHlsToMp4 ~ remuxing was canceled for item: ${item.Name}`,
-              );
-              resolve();
+              reject(error);
             }
-
-            setProgress(null);
-          } catch (error) {
-            reject(error);
-          }
+          });
         });
-      });
-    } catch (error) {
-      console.error("Failed to remux:", error);
-      writeToLog(
-        "ERROR",
-        `useRemuxHlsToMp4 ~ remuxing failed for item: ${item.Name}`,
-      );
-      setProgress(null);
-      throw error; // Re-throw the error to propagate it to the caller
-    }
-  }, [output, item, command, setProgress]);
+      } catch (e) {
+        const error = e as Error;
+        const errorLog = `Error: ${error.message}, Stack: ${error.stack}`;
+        console.error("Failed to remux:", error);
+        writeToLog(
+          "ERROR",
+          `useRemuxHlsToMp4 ~ remuxing failed for item: ${item.Name}, ${errorLog}`
+        );
+        setProcesses((prev) => {
+          return prev.filter((process) => process.itemId !== item.Id);
+        });
+        throw error; // Re-throw the error to propagate it to the caller
+      }
+    },
+    []
+  );
 
   const cancelRemuxing = useCallback(() => {
     FFmpegKit.cancel();
-    setProgress(null);
-    writeToLog(
-      "INFO",
-      `useRemuxHlsToMp4 ~ remuxing cancelled for item: ${item.Name}`,
-    );
-  }, [item.Name, setProgress]);
+    setProcesses([]);
+  }, []);
 
   return { startRemuxing, cancelRemuxing };
 };
-
-/**
- * Updates the list of downloaded files in AsyncStorage.
- *
- * @param item - The item to add to the downloaded files list
- */
-async function updateDownloadedFiles(item: BaseItemDto): Promise<void> {
-  try {
-    const currentFiles: BaseItemDto[] = JSON.parse(
-      (await AsyncStorage.getItem("downloaded_files")) || "[]",
-    );
-    const updatedFiles = [
-      ...currentFiles.filter((i) => i.Id !== item.Id),
-      item,
-    ];
-    await AsyncStorage.setItem(
-      "downloaded_files",
-      JSON.stringify(updatedFiles),
-    );
-  } catch (error) {
-    console.error("Error updating downloaded files:", error);
-    writeToLog(
-      "ERROR",
-      `Failed to update downloaded files for item: ${item.Name}`,
-    );
-  }
-}

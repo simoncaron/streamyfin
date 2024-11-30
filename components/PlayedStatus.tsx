@@ -7,9 +7,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import * as Haptics from "expo-haptics";
 import { useAtom } from "jotai";
 import React from "react";
-import { TouchableOpacity, View } from "react-native";
+import { TouchableOpacity, View, ViewProps } from "react-native";
 
-export const PlayedStatus: React.FC<{ item: BaseItemDto }> = ({ item }) => {
+interface Props extends ViewProps {
+  item: BaseItemDto;
+}
+
+export const PlayedStatus: React.FC<Props> = ({ item, ...props }) => {
   const [api] = useAtom(apiAtom);
   const [user] = useAtom(userAtom);
 
@@ -17,10 +21,16 @@ export const PlayedStatus: React.FC<{ item: BaseItemDto }> = ({ item }) => {
 
   const invalidateQueries = () => {
     queryClient.invalidateQueries({
-      queryKey: ["item"],
+      queryKey: ["item", item.Id],
     });
     queryClient.invalidateQueries({
       queryKey: ["resumeItems"],
+    });
+    queryClient.invalidateQueries({
+      queryKey: ["continueWatching"],
+    });
+    queryClient.invalidateQueries({
+      queryKey: ["nextUp-all"],
     });
     queryClient.invalidateQueries({
       queryKey: ["nextUp"],
@@ -32,12 +42,15 @@ export const PlayedStatus: React.FC<{ item: BaseItemDto }> = ({ item }) => {
       queryKey: ["seasons"],
     });
     queryClient.invalidateQueries({
-      queryKey: ["nextUp-all"],
+      queryKey: ["home"],
     });
   };
 
   return (
-    <View>
+    <View
+      className=" bg-neutral-800/80 rounded-full h-10 w-10 flex items-center justify-center"
+      {...props}
+    >
       {item.UserData?.Played ? (
         <TouchableOpacity
           onPress={async () => {
@@ -51,7 +64,7 @@ export const PlayedStatus: React.FC<{ item: BaseItemDto }> = ({ item }) => {
           }}
         >
           <View className="rounded h-10 aspect-square flex items-center justify-center">
-            <Ionicons name="checkmark-circle" size={30} color="white" />
+            <Ionicons name="checkmark-circle" size={24} color="white" />
           </View>
         </TouchableOpacity>
       ) : (
@@ -67,7 +80,7 @@ export const PlayedStatus: React.FC<{ item: BaseItemDto }> = ({ item }) => {
           }}
         >
           <View className="rounded h-10 aspect-square flex items-center justify-center">
-            <Ionicons name="checkmark-circle-outline" size={30} color="white" />
+            <Ionicons name="checkmark-circle-outline" size={24} color="white" />
           </View>
         </TouchableOpacity>
       )}

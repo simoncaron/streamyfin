@@ -1,48 +1,41 @@
-import React, { useCallback } from "react";
-import { TouchableOpacity } from "react-native";
 import { BaseItemDto } from "@jellyfin/sdk/lib/generated-client/models";
-import * as ContextMenu from "zeego/context-menu";
 import * as Haptics from "expo-haptics";
-import * as FileSystem from "expo-file-system";
-import { useAtom } from "jotai";
-
-import { Text } from "../common/Text";
-import { useFiles } from "@/hooks/useFiles";
+import React, { useCallback, useMemo, useRef } from "react";
+import { TouchableOpacity, View } from "react-native";
 import {
-  currentlyPlayingItemAtom,
-  fullScreenAtom,
-  playingAtom,
-} from "../CurrentlyPlayingBar";
-import { useSettings } from "@/utils/atoms/settings";
+  ActionSheetProvider,
+  useActionSheet,
+} from "@expo/react-native-action-sheet";
+
+import { useDownloadedFileOpener } from "@/hooks/useDownloadedFileOpener";
+import { Text } from "../common/Text";
+import { useDownload } from "@/providers/DownloadProvider";
+import { storage } from "@/utils/mmkv";
+import { Image } from "expo-image";
+import { ItemCardText } from "../ItemCardText";
+import { Ionicons } from "@expo/vector-icons";
 
 interface EpisodeCardProps {
   item: BaseItemDto;
 }
 
 /**
- * EpisodeCard component displays an episode with context menu options.
+ * EpisodeCard component displays an episode with action sheet options.
  * @param {EpisodeCardProps} props - The component props.
  * @returns {React.ReactElement} The rendered EpisodeCard component.
  */
 export const EpisodeCard: React.FC<EpisodeCardProps> = ({ item }) => {
-  const { deleteFile } = useFiles();
-  const [, setCurrentlyPlaying] = useAtom(currentlyPlayingItemAtom);
-  const [, setPlaying] = useAtom(playingAtom);
-  const [, setFullscreen] = useAtom(fullScreenAtom);
-  const [settings] = useSettings();
+  const { deleteFile } = useDownload();
+  const { openFile } = useDownloadedFileOpener();
+  const { showActionSheetWithOptions } = useActionSheet();
 
-  /**
-   * Handles opening the file for playback.
-   */
-  const handleOpenFile = useCallback(async () => {
-    setCurrentlyPlaying({
-      item,
-      playbackUrl: `${FileSystem.documentDirectory}/${item.Id}.mp4`,
-    });
-    setPlaying(true);
-    if (settings?.openFullScreenVideoPlayerByDefault === true)
-      setFullscreen(true);
-  }, [item, setCurrentlyPlaying, settings]);
+  const base64Image = useMemo(() => {
+    return storage.getString(item.Id!);
+  }, []);
+
+  const handleOpenFile = useCallback(() => {
+    openFile(item);
+  }, [item, openFile]);
 
   /**
    * Handles deleting the file with haptic feedback.
@@ -54,43 +47,70 @@ export const EpisodeCard: React.FC<EpisodeCardProps> = ({ item }) => {
     }
   }, [deleteFile, item.Id]);
 
-  const contextMenuOptions = [
-    {
-      label: "Delete",
-      onSelect: handleDeleteFile,
-      destructive: true,
-    },
-  ];
+  const showActionSheet = useCallback(() => {
+    const options = ["Delete", "Cancel"];
+    const destructiveButtonIndex = 0;
+    const cancelButtonIndex = 1;
+
+    showActionSheetWithOptions(
+      {
+        options,
+        cancelButtonIndex,
+        destructiveButtonIndex,
+      },
+      (selectedIndex) => {
+        switch (selectedIndex) {
+          case destructiveButtonIndex:
+            // Delete
+            handleDeleteFile();
+            break;
+          case cancelButtonIndex:
+            // Cancelled
+            break;
+        }
+      }
+    );
+  }, [showActionSheetWithOptions, handleDeleteFile]);
 
   return (
-    <ContextMenu.Root>
-      <ContextMenu.Trigger>
-        <TouchableOpacity
-          onPress={handleOpenFile}
-          className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4"
-        >
-          <Text className="font-bold">{item.Name}</Text>
-          <Text className="text-xs opacity-50">Episode {item.IndexNumber}</Text>
-        </TouchableOpacity>
-      </ContextMenu.Trigger>
-      <ContextMenu.Content
-        alignOffset={0}
-        avoidCollisions
-        collisionPadding={10}
-        loop={false}
-      >
-        {contextMenuOptions.map((option) => (
-          <ContextMenu.Item
-            key={option.label}
-            onSelect={option.onSelect}
-            destructive={option.destructive}
-          >
-            <ContextMenu.ItemTitle style={{ color: "red" }}>
-              {option.label}
-            </ContextMenu.ItemTitle>
-          </ContextMenu.Item>
-        ))}
-      </ContextMenu.Content>
-    </ContextMenu.Root>
+    <TouchableOpacity
+      onPress={handleOpenFile}
+      onLongPress={showActionSheet}
+      className="flex flex-col w-44 mr-2"
+    >
+      {base64Image ? (
+        <View className="w-44 aspect-video rounded-lg overflow-hidden">
+          <Image
+            source={{
+              uri: `data:image/jpeg;base64,${base64Image}`,
+            }}
+            style={{
+              width: "100%",
+              height: "100%",
+              resizeMode: "cover",
+            }}
+          />
+        </View>
+      ) : (
+        <View className="w-44 aspect-video rounded-lg bg-neutral-900 flex items-center justify-center">
+          <Ionicons
+            name="image-outline"
+            size={24}
+            color="gray"
+            className="self-center mt-16"
+          />
+        </View>
+      )}
+      <ItemCardText item={item} />
+    </TouchableOpacity>
   );
 };
+
+// Wrap the parent component with ActionSheetProvider
+export const EpisodeCardWithActionSheet: React.FC<EpisodeCardProps> = (
+  props
+) => (
+  <ActionSheetProvider>
+    <EpisodeCard {...props} />
+  </ActionSheetProvider>
+);
